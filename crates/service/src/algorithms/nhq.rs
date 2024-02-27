@@ -1,4 +1,3 @@
-use super::quantization::Quantization;
 use super::raw::Raw;
 use crate::index::segments::growing::GrowingSegment;
 use crate::index::segments::sealed::SealedSegment;
@@ -6,15 +5,26 @@ use crate::prelude::*;
 use crate::utils::dir_ops::sync_dir;
 use crate::utils::element_heap::ElementHeap;
 use crate::utils::mmap_array::MmapArray;
-use bytemuck::{Pod, Zeroable};
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use crate::utils::visited_pool::VisitedPool;
+use heapify::*;
+use parking_lot::RwLock;
+use rand::prelude::SliceRandom;
+use rand::rngs::StdRng;
+use rand::seq::index::sample;
+use rand::thread_rng;
+use rand::Rng;
+use rand::SeedableRng;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelRefMutIterator;
+use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::create_dir;
-use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::Arc;
+
+const CONTROL_NUM: usize = 100;
 
 pub struct Nhq<S: G> {
     mmap: NhqMmap<S>,
@@ -45,7 +55,7 @@ impl<S: G> Nhq<S> {
         opts: &SearchOptions,
         filter: impl Filter,
     ) -> BinaryHeap<Reverse<Element>> {
-        basic(&self.mmap, vector, opts.nhq_ef_search, filter)
+        basic(&self.mmap, vector, opts.hnsw_ef_search, filter)
     }
 
     pub fn vbase<'a>(
@@ -54,7 +64,7 @@ impl<S: G> Nhq<S> {
         opts: &'a SearchOptions,
         filter: impl Filter + 'a,
     ) -> (Vec<Element>, Box<(dyn Iterator<Item = Element> + 'a)>) {
-        vbase(&self.mmap, vector, opts.nhq_ef_search, filter)
+        vbase(&self.mmap, vector, opts.hnsw_ef_search, filter)
     }
 
     pub fn len(&self) -> u32 {
@@ -75,55 +85,207 @@ unsafe impl<S: G> Sync for Nhq<S> {}
 
 pub struct NhqRam<S: G> {
     raw: Arc<Raw<S>>,
-    quantization: Quantization<S>,
     // ----------------------
     m: u32,
     // ----------------------
-    graph: NhqRamGraph,
+    graph: Vec<Vec<u32>>,
     // ----------------------
     visited: VisitedPool,
-}
-
-struct NhqRamGraph {
-    vertexs: Vec<NhqRamVertex>,
-}
-
-struct NhqRamVertex {
-    layers: Vec<RwLock<NhqRamLayer>>,
-}
-
-impl NhqRamVertex {
-    fn levels(&self) -> u8 {
-        self.layers.len() as u8 - 1
-    }
-}
-
-struct NhqRamLayer {
-    edges: Vec<(F32, u32)>,
 }
 
 pub struct NhqMmap<S: G> {
     raw: Arc<Raw<S>>,
-    quantization: Quantization<S>,
     // ----------------------
     m: u32,
     // ----------------------
-    edges: MmapArray<NhqMmapEdge>,
-    by_layer_id: MmapArray<usize>,
-    by_vertex_id: MmapArray<usize>,
-    // ----------------------
+    edges: MmapArray<u32>,
     visited: VisitedPool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct NhqMmapEdge(#[allow(dead_code)] F32, u32);
-// we may convert a memory-mapped graph to a memory graph
-// so that it speeds merging sealed segments
-
 unsafe impl<S: G> Send for NhqMmap<S> {}
 unsafe impl<S: G> Sync for NhqMmap<S> {}
-unsafe impl Pod for NhqMmapEdge {}
-unsafe impl Zeroable for NhqMmapEdge {}
+
+fn generate_control_set<S: G>(raw: Arc<Raw<S>>, c: &[u32], v: &mut Vec<Vec<u32>>, n: u32) {
+    v.par_iter_mut().enumerate().for_each(|(i, vi)| {
+        let mut tmp = BinaryHeap::new();
+        for j in 0..n {
+            let dist = S::distance(raw.vector(c[i]), raw.vector(j));
+            tmp.push(Neighbor::new(j, dist, true));
+        }
+        *vi = tmp
+            .into_sorted_vec()
+            .into_iter()
+            .take(CONTROL_NUM)
+            .map(|neighbor| neighbor.id)
+            .collect();
+    });
+}
+
+fn eval_recall(graph: &[Nhood], control_points: &[u32], acc_eval_set: &[Vec<u32>]) -> f32 {
+    control_points
+        .iter()
+        .enumerate()
+        .map(|(i, &cp)| {
+            let acc = graph[cp as usize]
+                .pool
+                .read()
+                .iter()
+                .enumerate()
+                .map(|(_, g)| {
+                    acc_eval_set[i]
+                        .iter()
+                        .find(|&&v| g.id == v)
+                        .map_or(0.0, |_| 1.0)
+                })
+                .sum::<f32>()
+                / acc_eval_set[i].len() as f32;
+            acc
+        })
+        .sum::<f32>()
+        / control_points.len() as f32
+}
+
+fn initialize_graph<S: G>(raw: Arc<Raw<S>>, n: u32, l: u32, s: u32) -> Vec<Nhood> {
+    let mut graph = Vec::new();
+    let mut rng = StdRng::from_entropy();
+    graph.resize_with(n as usize, || Nhood::new(l, s, &mut rng, n));
+    graph.par_iter_mut().enumerate().for_each(|(i, nhood)| {
+        let mut pool = nhood.pool.write();
+        let init_neighbors = sample(&mut thread_rng(), n as usize, s as usize + 1).into_vec();
+        for id in init_neighbors {
+            if id == i {
+                continue;
+            }
+            let dist = S::distance(raw.vector(i as u32), raw.vector(id as u32));
+            pool.push(Neighbor::new(id as u32, dist, true));
+        }
+    });
+    graph
+}
+
+fn update(graph: &mut Vec<Nhood>, s: u32, r: u32) {
+    graph.par_iter_mut().for_each(|nhood| {
+        let mut pool = nhood.pool.write();
+        pool.sort_unstable();
+        let maxl = std::cmp::min(nhood.m + s, pool.len() as u32);
+        let mut c = 0;
+        let mut l = 0;
+        while l < maxl && c < s {
+            if pool[l as usize].flag {
+                c += 1;
+            }
+            l += 1;
+        }
+        nhood.m = l;
+    });
+    graph.par_iter().enumerate().for_each(|(i, nhood)| {
+        let (nn_new, nn_old) = {
+            let mut nn_new = Vec::new();
+            let mut nn_old = Vec::new();
+            let mut pool = nhood.pool.write();
+            for nn in pool.iter_mut().take(nhood.m as usize) {
+                let nhood_o = &graph[nn.id as usize];
+                if nn.flag {
+                    nn_new.push(nn.id);
+                    if nn.distance > *nhood_o.upper_bound.read() {
+                        let mut nhood_o_rnn_new = nhood_o.rnn_new.write();
+                        if nhood_o_rnn_new.len() < r as usize {
+                            nhood_o_rnn_new.push(i as u32);
+                        } else {
+                            let pos = thread_rng().gen_range(0..r);
+                            nhood_o_rnn_new[pos as usize] = i as u32;
+                        }
+                    }
+                    nn.flag = false;
+                } else {
+                    nn_old.push(nn.id);
+                    if nn.distance > *nhood_o.upper_bound.read() {
+                        let mut nhood_o_rnn_old = nhood_o.rnn_old.write();
+                        if nhood_o_rnn_old.len() < r as usize {
+                            nhood_o_rnn_old.push(i as u32);
+                        } else {
+                            let pos = thread_rng().gen_range(0..r);
+                            nhood_o_rnn_old[pos as usize] = i as u32;
+                        }
+                    }
+                }
+            }
+            make_heap(&mut pool);
+            (nn_new, nn_old)
+        };
+        *nhood.nn_new.write() = nn_new;
+        *nhood.nn_old.write() = nn_old;
+    });
+    graph.par_iter_mut().for_each(|nhood| {
+        let mut nn_new = nhood.nn_new.write();
+        let mut nn_old = nhood.nn_old.write();
+        let mut rnn_new = nhood.rnn_new.write();
+        let mut rnn_old = nhood.rnn_old.write();
+        if r != 0 && rnn_new.len() > r as usize {
+            rnn_new.shuffle(&mut thread_rng());
+            rnn_new.truncate(r as usize);
+            rnn_new.shrink_to_fit();
+        }
+        nn_new.extend(rnn_new.drain(..));
+        if r != 0 && rnn_old.len() > r as usize {
+            rnn_old.shuffle(&mut thread_rng());
+            rnn_old.truncate(r as usize);
+            rnn_old.shrink_to_fit();
+        }
+        nn_old.extend(rnn_old.drain(..));
+        if nn_old.len() > r as usize * 2 {
+            nn_old.truncate(r as usize * 2);
+            nn_old.shrink_to_fit();
+        }
+    });
+}
+
+fn join<S: G>(raw: Arc<Raw<S>>, graph: &mut [Nhood], n: u32) {
+    (0..n).into_par_iter().for_each(|id| {
+        graph[id as usize].join(|i, j| {
+            if i != j {
+                let dist = S::distance(raw.vector(i), raw.vector(j));
+                graph[i as usize].insert(j, dist);
+                graph[j as usize].insert(i, dist);
+            }
+        });
+    });
+}
+
+fn select_edge<S: G>(
+    raw: Arc<Raw<S>>,
+    graph: &mut [Nhood],
+    n: u32,
+    k: u32,
+    m: u32,
+) -> Vec<Vec<u32>> {
+    let mut final_graph = vec![Vec::new(); n as usize];
+    final_graph
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, node)| {
+            let mut pool = graph[i].pool.write();
+            pool.sort_unstable();
+            for Neighbor {
+                id: u,
+                distance: u_dis,
+                flag: _,
+            } in pool.iter().take(k as usize)
+            {
+                if node.len() == m as usize {
+                    break;
+                }
+                let check = node
+                    .iter()
+                    .map(|&v| S::distance(raw.vector(*u), raw.vector(v)))
+                    .all(|dist| dist > *u_dis);
+                if check {
+                    node.push(*u);
+                }
+            }
+        });
+    final_graph
+}
 
 pub fn make<S: G>(
     path: &Path,
@@ -133,8 +295,11 @@ pub fn make<S: G>(
 ) -> NhqRam<S> {
     let NhqIndexingOptions {
         m,
-        ef_construction,
-        quantization: quantization_opts,
+        k,
+        l,
+        s,
+        r,
+        quantization: _,
     } = options.indexing.clone().unwrap_nhq();
     let raw = Arc::new(Raw::create(
         &path.join("raw"),
@@ -142,225 +307,48 @@ pub fn make<S: G>(
         sealed,
         growing,
     ));
-    let quantization = Quantization::create(
-        &path.join("quantization"),
-        options.clone(),
-        quantization_opts,
-        &raw,
-        (0..raw.len()).collect::<Vec<_>>(),
-    );
-    let n = raw.len();
-    let graph = NhqRamGraph {
-        vertexs: (0..n)
-            .into_par_iter()
-            .map(|i| NhqRamVertex {
-                layers: (0..count_layers_of_a_vertex(m, i))
-                    .map(|_| RwLock::new(NhqRamLayer { edges: Vec::new() }))
-                    .collect(),
-            })
-            .collect(),
-    };
-    let entry = RwLock::<Option<u32>>::new(None);
     let visited = VisitedPool::new(raw.len());
-    (0..n).into_par_iter().for_each(|i| {
-        fn fast_search<S: G>(
-            quantization: &Quantization<S>,
-            graph: &NhqRamGraph,
-            levels: RangeInclusive<u8>,
-            u: u32,
-            target: Borrowed<'_, S>,
-        ) -> u32 {
-            let mut u = u;
-            let mut u_dis = quantization.distance(target, u);
-            for i in levels.rev() {
-                let mut changed = true;
-                while changed {
-                    changed = false;
-                    let guard = graph.vertexs[u as usize].layers[i as usize].read();
-                    for &(_, v) in guard.edges.iter() {
-                        let v_dis = quantization.distance(target, v);
-                        if v_dis < u_dis {
-                            u = v;
-                            u_dis = v_dis;
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            u
+    let n = raw.len();
+    let mut graph = initialize_graph(raw.clone(), n, l, s);
+    let control_points: Vec<u32> = sample(&mut thread_rng(), n as usize, CONTROL_NUM)
+        .iter()
+        .map(|i| i as u32)
+        .collect();
+    let mut acc_eval_set = vec![Vec::new(); CONTROL_NUM];
+    generate_control_set(raw.clone(), &control_points, &mut acc_eval_set, n);
+    loop {
+        update(&mut graph, s, r);
+        join(raw.clone(), &mut graph, n);
+        if eval_recall(&graph, &control_points, &acc_eval_set) > 0.8 {
+            break;
         }
-        fn local_search<S: G>(
-            quantization: &Quantization<S>,
-            graph: &NhqRamGraph,
-            visited: &mut VisitedGuard,
-            vector: Borrowed<'_, S>,
-            s: u32,
-            k: usize,
-            i: u8,
-        ) -> Vec<(F32, u32)> {
-            let mut visited = visited.fetch();
-            let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
-            let mut results = BinaryHeap::new();
-            let s_dis = quantization.distance(vector, s);
-            visited.mark(s);
-            candidates.push(Reverse((s_dis, s)));
-            results.push((s_dis, s));
-            while let Some(Reverse((u_dis, u))) = candidates.pop() {
-                if !(results.len() < k || u_dis < results.peek().unwrap().0) {
-                    break;
-                }
-                for &(_, v) in graph.vertexs[u as usize].layers[i as usize]
-                    .read()
-                    .edges
-                    .iter()
-                {
-                    if !visited.check(v) {
-                        continue;
-                    }
-                    visited.mark(v);
-                    let v_dis = quantization.distance(vector, v);
-                    if results.len() < k || v_dis < results.peek().unwrap().0 {
-                        candidates.push(Reverse((v_dis, v)));
-                        results.push((v_dis, v));
-                        if results.len() > k {
-                            results.pop();
-                        }
-                    }
-                }
-            }
-            results.into_sorted_vec()
-        }
-        fn select<S: G>(quantization: &Quantization<S>, input: &mut Vec<(F32, u32)>, size: u32) {
-            if input.len() <= size as usize {
-                return;
-            }
-            let mut res = Vec::new();
-            for (u_dis, u) in input.iter().copied() {
-                if res.len() == size as usize {
-                    break;
-                }
-                let check = res
-                    .iter()
-                    .map(|&(_, v)| quantization.distance2(u, v))
-                    .all(|dist| dist > u_dis);
-                if check {
-                    res.push((u_dis, u));
-                }
-            }
-            *input = res;
-        }
-        let mut visited = visited.fetch();
-        let target = raw.vector(i);
-        let levels = graph.vertexs[i as usize].levels();
-        let local_entry;
-        let update_entry;
-        {
-            let check = |global: Option<u32>| {
-                if let Some(u) = global {
-                    graph.vertexs[u as usize].levels() < levels
-                } else {
-                    true
-                }
-            };
-            let read = entry.read();
-            if check(*read) {
-                drop(read);
-                let write = entry.write();
-                if check(*write) {
-                    local_entry = *write;
-                    update_entry = Some(write);
-                } else {
-                    local_entry = *write;
-                    update_entry = None;
-                }
-            } else {
-                local_entry = *read;
-                update_entry = None;
-            }
-        };
-        let Some(mut u) = local_entry else {
-            if let Some(mut write) = update_entry {
-                *write = Some(i);
-            }
-            return;
-        };
-        let top = graph.vertexs[u as usize].levels();
-        if top > levels {
-            u = fast_search(&quantization, &graph, levels + 1..=top, u, target);
-        }
-        let mut result = Vec::with_capacity(1 + std::cmp::min(levels, top) as usize);
-        for j in (0..=std::cmp::min(levels, top)).rev() {
-            let mut edges = local_search(
-                &quantization,
-                &graph,
-                &mut visited,
-                target,
-                u,
-                ef_construction,
-                j,
-            );
-            edges.sort();
-            select(&quantization, &mut edges, count_max_edges_of_a_layer(m, j));
-            u = edges.first().unwrap().1;
-            result.push(edges);
-        }
-        for j in 0..=std::cmp::min(levels, top) {
-            let mut write = graph.vertexs[i as usize].layers[j as usize].write();
-            write.edges = result.pop().unwrap();
-            let read = RwLockWriteGuard::downgrade(write);
-            for (n_dis, n) in read.edges.iter().copied() {
-                let mut write = graph.vertexs[n as usize].layers[j as usize].write();
-                let element = (n_dis, i);
-                let (Ok(index) | Err(index)) = write.edges.binary_search(&element);
-                write.edges.insert(index, element);
-                select(
-                    &quantization,
-                    &mut write.edges,
-                    count_max_edges_of_a_layer(m, j),
-                );
-            }
-        }
-        if let Some(mut write) = update_entry {
-            *write = Some(i);
-        }
-    });
+    }
+    let graph = select_edge(raw.clone(), &mut graph, n, k, m);
     NhqRam {
         raw,
-        quantization,
         m,
         graph,
         visited,
     }
 }
 
-pub fn save<S: G>(mut ram: NhqRam<S>, path: &Path) -> NhqMmap<S> {
+pub fn save<S: G>(ram: NhqRam<S>, path: &Path) -> NhqMmap<S> {
     let edges = MmapArray::create(
         &path.join("edges"),
         ram.graph
-            .vertexs
-            .iter_mut()
-            .flat_map(|v| v.layers.iter_mut())
-            .flat_map(|v| &v.get_mut().edges)
-            .map(|&(_0, _1)| NhqMmapEdge(_0, _1)),
+            .into_iter()
+            .map(|mut v| {
+                let len = v.len();
+                v.resize_with(ram.m as usize, || 0);
+                v.insert(0, len as u32);
+                v
+            })
+            .flat_map(|v| v.into_iter()),
     );
-    let by_layer_id = MmapArray::create(&path.join("by_layer_id"), {
-        let iter = ram.graph.vertexs.iter_mut();
-        let iter = iter.flat_map(|v| v.layers.iter_mut());
-        let iter = iter.map(|v| v.get_mut().edges.len());
-        caluate_offsets(iter)
-    });
-    let by_vertex_id = MmapArray::create(&path.join("by_vertex_id"), {
-        let iter = ram.graph.vertexs.iter_mut();
-        let iter = iter.map(|v| v.layers.len());
-        caluate_offsets(iter)
-    });
     NhqMmap {
         raw: ram.raw,
-        quantization: ram.quantization,
         m: ram.m,
         edges,
-        by_layer_id,
-        by_vertex_id,
         visited: ram.visited,
     }
 }
@@ -368,24 +356,12 @@ pub fn save<S: G>(mut ram: NhqRam<S>, path: &Path) -> NhqMmap<S> {
 pub fn open<S: G>(path: &Path, options: IndexOptions) -> NhqMmap<S> {
     let idx_opts = options.indexing.clone().unwrap_nhq();
     let raw = Arc::new(Raw::open(&path.join("raw"), options.clone()));
-    let quantization = Quantization::open(
-        &path.join("quantization"),
-        options.clone(),
-        idx_opts.quantization,
-        &raw,
-    );
     let edges = MmapArray::open(&path.join("edges"));
-    let by_layer_id = MmapArray::open(&path.join("by_layer_id"));
-    let by_vertex_id = MmapArray::open(&path.join("by_vertex_id"));
-    let idx_opts = options.indexing.unwrap_nhq();
     let n = raw.len();
     NhqMmap {
         raw,
-        quantization,
         m: idx_opts.m,
         edges,
-        by_layer_id,
-        by_vertex_id,
         visited: VisitedPool::new(n),
     }
 }
@@ -394,28 +370,84 @@ pub fn basic<S: G>(
     mmap: &NhqMmap<S>,
     vector: Borrowed<'_, S>,
     ef_search: usize,
-    filter: impl Filter,
+    mut filter: impl Filter,
 ) -> BinaryHeap<Reverse<Element>> {
     let Some(s) = entry(mmap, filter.clone()) else {
         return BinaryHeap::new();
     };
-    let levels = count_layers_of_a_vertex(mmap.m, s) - 1;
-    let u = fast_search(mmap, 1..=levels, s, vector, filter.clone());
-    local_search_basic(mmap, ef_search, u, vector, filter).into_reversed_heap()
+    let raw = &mmap.raw;
+    let mut visited = mmap.visited.fetch2();
+    let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
+    let mut results = ElementHeap::new(ef_search);
+    visited.mark(s);
+    let s_dis = S::distance(vector, raw.vector(s));
+    candidates.push(Reverse((s_dis, s)));
+    results.push(Element {
+        distance: s_dis,
+        payload: mmap.raw.payload(s),
+    });
+    while let Some(Reverse((u_dis, u))) = candidates.pop() {
+        if !results.check(u_dis) {
+            break;
+        }
+        let edges = find_edges(mmap, u);
+        for &v in edges {
+            if !visited.check(v) {
+                continue;
+            }
+            visited.mark(v);
+            if !filter.check(mmap.raw.payload(v)) {
+                continue;
+            }
+            let v_dis = S::distance(vector, raw.vector(v));
+            if !results.check(v_dis) {
+                continue;
+            }
+            candidates.push(Reverse((v_dis, v)));
+            results.push(Element {
+                distance: v_dis,
+                payload: mmap.raw.payload(v),
+            });
+        }
+    }
+    results.into_reversed_heap()
 }
 
 pub fn vbase<'a, S: G>(
     mmap: &'a NhqMmap<S>,
     vector: Borrowed<'a, S>,
     range: usize,
-    filter: impl Filter + 'a,
+    mut filter: impl Filter + 'a,
 ) -> (Vec<Element>, Box<(dyn Iterator<Item = Element> + 'a)>) {
     let Some(s) = entry(mmap, filter.clone()) else {
         return (Vec::new(), Box::new(std::iter::empty()));
     };
-    let levels = count_layers_of_a_vertex(mmap.m, s) - 1;
-    let u = fast_search(mmap, 1..=levels, s, vector, filter.clone());
-    let mut iter = local_search_vbase(mmap, u, vector, filter.clone());
+    let raw = &mmap.raw;
+    let mut visited = mmap.visited.fetch2();
+    let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
+    visited.mark(s);
+    let s_dis = S::distance(vector, raw.vector(s));
+    candidates.push(Reverse((s_dis, s)));
+    let mut iter = std::iter::from_fn(move || {
+        let Reverse((u_dis, u)) = candidates.pop()?;
+        {
+            let edges = find_edges(mmap, u);
+            for &v in edges {
+                if !visited.check(v) {
+                    continue;
+                }
+                visited.mark(v);
+                if filter.check(mmap.raw.payload(v)) {
+                    let v_dis = S::distance(vector, raw.vector(v));
+                    candidates.push(Reverse((v_dis, v)));
+                }
+            }
+        }
+        Some(Element {
+            distance: u_dis,
+            payload: mmap.raw.payload(u),
+        })
+    });
     let mut queue = BinaryHeap::<Element>::with_capacity(1 + range);
     let mut stage1 = Vec::new();
     for x in &mut iter {
@@ -460,263 +492,113 @@ pub fn entry<S: G>(mmap: &NhqMmap<S>, mut filter: impl Filter) -> Option<u32> {
     None
 }
 
-pub fn fast_search<S: G>(
-    mmap: &NhqMmap<S>,
-    levels: RangeInclusive<u8>,
-    u: u32,
-    vector: Borrowed<'_, S>,
-    mut filter: impl Filter,
-) -> u32 {
-    let mut u = u;
-    let mut u_dis = mmap.quantization.distance(vector, u);
-    for i in levels.rev() {
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let edges = find_edges(mmap, u, i);
-            for &NhqMmapEdge(_, v) in edges.iter() {
-                if !filter.check(mmap.raw.payload(v)) {
-                    continue;
-                }
-                let v_dis = mmap.quantization.distance(vector, v);
-                if v_dis < u_dis {
-                    u = v;
-                    u_dis = v_dis;
-                    changed = true;
-                }
-            }
-        }
-    }
-    u
+fn find_edges<S: G>(mmap: &NhqMmap<S>, u: u32) -> &[u32] {
+    let s = u as usize * (mmap.m as usize + 1) + 1;
+    let e = s + mmap.edges[s - 1] as usize;
+    &mmap.edges[s..e]
 }
 
-pub fn local_search_basic<S: G>(
-    mmap: &NhqMmap<S>,
-    k: usize,
-    s: u32,
-    vector: Borrowed<'_, S>,
-    mut filter: impl Filter,
-) -> ElementHeap {
-    let mut visited = mmap.visited.fetch();
-    let mut visited = visited.fetch();
-    let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
-    let mut results = ElementHeap::new(k);
-    visited.mark(s);
-    let s_dis = mmap.quantization.distance(vector, s);
-    candidates.push(Reverse((s_dis, s)));
-    results.push(Element {
-        distance: s_dis,
-        payload: mmap.raw.payload(s),
-    });
-    while let Some(Reverse((u_dis, u))) = candidates.pop() {
-        if !results.check(u_dis) {
-            break;
-        }
-        let edges = find_edges(mmap, u, 0);
-        for &NhqMmapEdge(_, v) in edges.iter() {
-            if !visited.check(v) {
-                continue;
-            }
-            visited.mark(v);
-            if !filter.check(mmap.raw.payload(v)) {
-                continue;
-            }
-            let v_dis = mmap.quantization.distance(vector, v);
-            if !results.check(v_dis) {
-                continue;
-            }
-            candidates.push(Reverse((v_dis, v)));
-            results.push(Element {
-                distance: v_dis,
-                payload: mmap.raw.payload(v),
-            });
-        }
-    }
-    results
+#[derive(Default, Clone, Eq)]
+struct Neighbor {
+    id: u32,
+    distance: F32,
+    flag: bool,
 }
 
-pub fn local_search_vbase<'a, S: G>(
-    mmap: &'a NhqMmap<S>,
-    s: u32,
-    vector: Borrowed<'a, S>,
-    mut filter: impl Filter + 'a,
-) -> impl Iterator<Item = Element> + 'a {
-    let mut visited = mmap.visited.fetch2();
-    let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
-    visited.mark(s);
-    let s_dis = mmap.quantization.distance(vector, s);
-    candidates.push(Reverse((s_dis, s)));
-    std::iter::from_fn(move || {
-        let Reverse((u_dis, u)) = candidates.pop()?;
+impl Neighbor {
+    fn new(id: u32, distance: F32, flag: bool) -> Self {
+        Neighbor { id, distance, flag }
+    }
+}
+
+impl Ord for Neighbor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.distance.cmp(&other.distance)
+    }
+}
+
+impl PartialOrd for Neighbor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Neighbor {
+    fn eq(&self, other: &Self) -> bool {
+        self.distance == other.distance
+    }
+}
+
+struct Nhood {
+    m: u32,
+    upper_bound: RwLock<F32>,
+    pool: RwLock<Vec<Neighbor>>,
+    nn_old: RwLock<Vec<u32>>,
+    nn_new: RwLock<Vec<u32>>,
+    rnn_old: RwLock<Vec<u32>>,
+    rnn_new: RwLock<Vec<u32>>,
+}
+
+impl Nhood {
+    fn new(l: u32, s: u32, rng: &mut StdRng, n: u32) -> Self {
+        let nn_new = RwLock::new(
+            sample(rng, n as usize, s as usize * 2)
+                .iter()
+                .map(|i| i as u32)
+                .collect(),
+        );
+        Nhood {
+            m: s,
+            upper_bound: RwLock::new(F32(0.0)),
+            pool: RwLock::new(Vec::with_capacity(l as usize)),
+            nn_old: RwLock::new(Vec::new()),
+            nn_new,
+            rnn_old: RwLock::new(Vec::new()),
+            rnn_new: RwLock::new(Vec::new()),
+        }
+    }
+
+    fn insert(&self, id: u32, dist: F32) {
         {
-            let edges = find_edges(mmap, u, 0);
-            for &NhqMmapEdge(_, v) in edges.iter() {
-                if !visited.check(v) {
-                    continue;
-                }
-                visited.mark(v);
-                if filter.check(mmap.raw.payload(v)) {
-                    let v_dis = mmap.quantization.distance(vector, v);
-                    candidates.push(Reverse((v_dis, v)));
-                }
+            let pool = self.pool.read();
+            if dist > pool[0].distance {
+                return;
+            }
+            if pool.iter().any(|neighbor| neighbor.id == id) {
+                return;
             }
         }
-        Some(Element {
-            distance: u_dis,
-            payload: mmap.raw.payload(u),
-        })
-    })
-}
-
-fn count_layers_of_a_vertex(m: u32, i: u32) -> u8 {
-    let mut x = i + 1;
-    let mut ans = 1;
-    while x % m == 0 {
-        ans += 1;
-        x /= m;
-    }
-    ans
-}
-
-fn count_max_edges_of_a_layer(m: u32, j: u8) -> u32 {
-    if j == 0 {
-        m * 2
-    } else {
-        m
-    }
-}
-
-fn caluate_offsets(iter: impl Iterator<Item = usize>) -> impl Iterator<Item = usize> {
-    let mut offset = 0usize;
-    let mut iter = std::iter::once(0).chain(iter);
-    std::iter::from_fn(move || {
-        let x = iter.next()?;
-        offset += x;
-        Some(offset)
-    })
-}
-
-fn find_edges<S: G>(mmap: &NhqMmap<S>, u: u32, level: u8) -> &[NhqMmapEdge] {
-    let offset = u as usize;
-    let index = mmap.by_vertex_id[offset]..mmap.by_vertex_id[offset + 1];
-    let offset = index.start + level as usize;
-    let index = mmap.by_layer_id[offset]..mmap.by_layer_id[offset + 1];
-    &mmap.edges[index]
-}
-
-struct VisitedPool {
-    n: u32,
-    locked_buffers: Mutex<Vec<VisitedBuffer>>,
-}
-
-impl VisitedPool {
-    pub fn new(n: u32) -> Self {
-        Self {
-            n,
-            locked_buffers: Mutex::new(Vec::new()),
-        }
-    }
-    pub fn fetch(&self) -> VisitedGuard {
-        let buffer = self
-            .locked_buffers
-            .lock()
-            .pop()
-            .unwrap_or_else(|| VisitedBuffer::new(self.n as _));
-        VisitedGuard { buffer, pool: self }
-    }
-
-    fn fetch2(&self) -> VisitedGuardChecker {
-        let mut buffer = self
-            .locked_buffers
-            .lock()
-            .pop()
-            .unwrap_or_else(|| VisitedBuffer::new(self.n as _));
         {
-            buffer.version = buffer.version.wrapping_add(1);
-            if buffer.version == 0 {
-                buffer.data.fill(0);
+            let mut pool = self.pool.write();
+            if pool.len() < pool.capacity() {
+                pool.push(Neighbor::new(id, dist, true));
+                push_heap(&mut pool);
+            } else {
+                pop_heap(&mut pool);
+                let len = pool.len();
+                pool[len - 1] = Neighbor::new(id, dist, true);
+                push_heap(&mut pool);
             }
-        }
-        VisitedGuardChecker { buffer, pool: self }
-    }
-}
-
-struct VisitedGuard<'a> {
-    buffer: VisitedBuffer,
-    pool: &'a VisitedPool,
-}
-
-impl<'a> VisitedGuard<'a> {
-    fn fetch(&mut self) -> VisitedChecker<'_> {
-        self.buffer.version = self.buffer.version.wrapping_add(1);
-        if self.buffer.version == 0 {
-            self.buffer.data.fill(0);
-        }
-        VisitedChecker {
-            buffer: &mut self.buffer,
+            let mut upper_bound = self.upper_bound.write();
+            *upper_bound = pool[0].distance;
         }
     }
-}
 
-impl<'a> Drop for VisitedGuard<'a> {
-    fn drop(&mut self) {
-        let src = VisitedBuffer {
-            version: 0,
-            data: Vec::new(),
-        };
-        let buffer = std::mem::replace(&mut self.buffer, src);
-        self.pool.locked_buffers.lock().push(buffer);
-    }
-}
-
-struct VisitedChecker<'a> {
-    buffer: &'a mut VisitedBuffer,
-}
-
-impl<'a> VisitedChecker<'a> {
-    fn check(&mut self, i: u32) -> bool {
-        self.buffer.data[i as usize] != self.buffer.version
-    }
-    fn mark(&mut self, i: u32) {
-        self.buffer.data[i as usize] = self.buffer.version;
-    }
-}
-
-struct VisitedGuardChecker<'a> {
-    buffer: VisitedBuffer,
-    pool: &'a VisitedPool,
-}
-
-impl<'a> VisitedGuardChecker<'a> {
-    fn check(&mut self, i: u32) -> bool {
-        self.buffer.data[i as usize] != self.buffer.version
-    }
-    fn mark(&mut self, i: u32) {
-        self.buffer.data[i as usize] = self.buffer.version;
-    }
-}
-
-impl<'a> Drop for VisitedGuardChecker<'a> {
-    fn drop(&mut self) {
-        let src = VisitedBuffer {
-            version: 0,
-            data: Vec::new(),
-        };
-        let buffer = std::mem::replace(&mut self.buffer, src);
-        self.pool.locked_buffers.lock().push(buffer);
-    }
-}
-
-struct VisitedBuffer {
-    version: usize,
-    data: Vec<usize>,
-}
-
-impl VisitedBuffer {
-    fn new(capacity: usize) -> Self {
-        Self {
-            version: 0,
-            data: bytemuck::zeroed_vec(capacity),
+    fn join<C>(&self, mut callback: C)
+    where
+        C: FnMut(u32, u32),
+    {
+        let nn_new = self.nn_new.read();
+        let nn_old = self.nn_old.read();
+        for &i in &*nn_new {
+            for &j in &*nn_new {
+                if i < j {
+                    callback(i, j);
+                }
+            }
+            for &j in &*nn_old {
+                callback(i, j);
+            }
         }
     }
 }

@@ -6,3 +6,4 @@ pub mod file_wal;
 pub mod mmap_array;
 pub mod tournament_tree;
 pub mod vec2;
+pub mod visited_pool;
