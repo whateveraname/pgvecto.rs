@@ -16,6 +16,10 @@ impl Global for Vecf16Dot {
     fn distance(lhs: Vecf16Borrowed<'_>, rhs: Vecf16Borrowed<'_>) -> F32 {
         super::vecf16::dot(lhs.slice(), rhs.slice()) * (-1.0)
     }
+
+    fn distance2(lhs: Borrowed<'_, Self>, rhs: &[Scalar<Self>]) -> F32 {
+        super::vecf16::dot(lhs.slice(), rhs) * (-1.0)
+    }
 }
 
 impl GlobalElkanKMeans for Vecf16Dot {

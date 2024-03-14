@@ -16,6 +16,10 @@ impl Global for Vecf16Cos {
     fn distance(lhs: Vecf16Borrowed<'_>, rhs: Vecf16Borrowed<'_>) -> F32 {
         F32(1.0) - super::vecf16::cosine(lhs.slice(), rhs.slice())
     }
+
+    fn distance2(lhs: Borrowed<'_, Self>, rhs: &[Scalar<Self>]) -> F32 {
+        F32(1.0) - super::vecf16::cosine(lhs.slice(), rhs)
+    }
 }
 
 impl GlobalElkanKMeans for Vecf16Cos {

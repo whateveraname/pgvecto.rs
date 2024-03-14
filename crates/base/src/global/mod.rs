@@ -86,6 +86,7 @@ pub trait Global: Copy + 'static {
     const DISTANCE_KIND: DistanceKind;
 
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32;
+    fn distance2(lhs: Borrowed<'_, Self>, rhs: &[Scalar<Self>]) -> F32;
 }
 
 pub type Owned<T> = <T as Global>::VectorOwned;

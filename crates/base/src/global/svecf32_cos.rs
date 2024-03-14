@@ -16,6 +16,10 @@ impl Global for SVecf32Cos {
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32 {
         F32(1.0) - super::svecf32::cosine(lhs, rhs)
     }
+
+    fn distance2(_lhs: Borrowed<'_, Self>, _rhs: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }
 
 impl GlobalElkanKMeans for SVecf32Cos {

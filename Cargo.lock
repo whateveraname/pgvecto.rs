@@ -1756,6 +1756,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmurhash3"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2983372caf4480544083767bf2d27defafe32af49ab4df3a0b7fc90793a3664"
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2675,6 +2681,7 @@ dependencies = [
  "heapify",
  "log",
  "memmap2",
+ "murmurhash3",
  "num-traits",
  "parking_lot",
  "rand",

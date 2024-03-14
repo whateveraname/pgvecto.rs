@@ -292,16 +292,16 @@ pub struct NhqIndexingOptions {
     #[validate(range(min = 4, max = 128))]
     pub m: u32,
     #[serde(default = "NhqIndexingOptions::default_k")]
-    #[validate(range(min = 4, max = 128))]
+    #[validate(range(min = 4, max = 1000))]
     pub k: u32,
     #[serde(default = "NhqIndexingOptions::default_l")]
-    #[validate(range(min = 4, max = 128))]
+    #[validate(range(min = 4, max = 1000))]
     pub l: u32,
     #[serde(default = "NhqIndexingOptions::default_s")]
-    #[validate(range(min = 4, max = 128))]
+    #[validate(range(min = 4, max = 1000))]
     pub s: u32,
     #[serde(default = "NhqIndexingOptions::default_r")]
-    #[validate(range(min = 4, max = 128))]
+    #[validate(range(min = 4, max = 1000))]
     pub r: u32,
     #[serde(default)]
     #[validate]
@@ -310,19 +310,19 @@ pub struct NhqIndexingOptions {
 
 impl NhqIndexingOptions {
     fn default_m() -> u32 {
-        12
+        24
     }
     fn default_k() -> u32 {
-        12
+        300
     }
     fn default_l() -> u32 {
-        12
+        400
     }
     fn default_s() -> u32 {
-        12
+        50
     }
     fn default_r() -> u32 {
-        12
+        500
     }
 }
 

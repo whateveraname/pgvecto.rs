@@ -16,6 +16,10 @@ impl Global for SVecf32Dot {
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32 {
         super::svecf32::dot(lhs, rhs) * (-1.0)
     }
+
+    fn distance2(_lhs: Borrowed<'_, Self>, _rhs: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }
 
 impl GlobalElkanKMeans for SVecf32Dot {
