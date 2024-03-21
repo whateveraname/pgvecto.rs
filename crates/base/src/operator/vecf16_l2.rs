@@ -14,4 +14,7 @@ impl Operator for Vecf16L2 {
     fn distance(lhs: Vecf16Borrowed<'_>, rhs: Vecf16Borrowed<'_>) -> F32 {
         vecf16::sl2(lhs.slice(), rhs.slice())
     }
+    fn distance2(lhs: Borrowed<'_, Self>, rhs: &[Scalar<Self>]) -> F32 {
+        vecf16::sl2(lhs.slice(), rhs)
+    }
 }

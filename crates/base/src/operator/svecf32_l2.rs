@@ -14,4 +14,7 @@ impl Operator for SVecf32L2 {
     fn distance(lhs: SVecf32Borrowed<'_>, rhs: SVecf32Borrowed<'_>) -> F32 {
         svecf32::sl2(lhs, rhs)
     }
+    fn distance2(_: Borrowed<'_, Self>, _: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }

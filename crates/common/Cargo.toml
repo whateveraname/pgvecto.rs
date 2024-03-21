@@ -10,6 +10,7 @@ memmap2.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+parking_lot.workspace = true
 
 [lints]
 workspace = true

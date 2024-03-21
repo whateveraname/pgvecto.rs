@@ -13,8 +13,6 @@ thiserror.workspace = true
 base = { path = "../base" }
 common = { path = "../common" }
 index = { path = "../index" }
-heapify = "0.2.0"
-murmurhash3 = "0.0.5"
 
 [lints]
 workspace = true

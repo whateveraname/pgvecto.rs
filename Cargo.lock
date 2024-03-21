@@ -581,6 +581,7 @@ dependencies = [
  "bytemuck",
  "log",
  "memmap2",
+ "parking_lot",
  "rustix 0.38.31",
  "serde",
  "serde_json",
@@ -1369,6 +1370,7 @@ dependencies = [
  "hnsw",
  "ivf",
  "log",
+ "nhq",
  "parking_lot",
  "quantization",
  "rand",
@@ -1693,6 +1695,22 @@ name = "new_debug_unreachable"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
+
+[[package]]
+name = "nhq"
+version = "0.0.0"
+dependencies = [
+ "base",
+ "bytemuck",
+ "common",
+ "heapify",
+ "murmurhash3",
+ "parking_lot",
+ "quantization",
+ "rand",
+ "rayon 0.0.0",
+ "storage",
+]
 
 [[package]]
 name = "nom"
@@ -2456,9 +2474,7 @@ dependencies = [
  "arc-swap",
  "base",
  "common",
- "heapify",
  "index",
- "murmurhash3",
  "parking_lot",
  "serde",
  "serde_json",

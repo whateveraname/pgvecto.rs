@@ -8,7 +8,9 @@ use base::search::*;
 use bytemuck::{Pod, Zeroable};
 use common::dir_ops::sync_dir;
 use common::mmap_array::MmapArray;
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use common::visited_pool::VisitedGuard;
+use common::visited_pool::VisitedPool;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use quantization::operator::OperatorQuantization;
 use quantization::Quantization;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -608,123 +610,6 @@ fn find_edges<O: OperatorHnsw>(mmap: &HnswMmap<O>, u: u32, level: u8) -> &[HnswM
     let offset = index.start + level as usize;
     let index = mmap.by_layer_id[offset]..mmap.by_layer_id[offset + 1];
     &mmap.edges[index]
-}
-
-struct VisitedPool {
-    n: u32,
-    locked_buffers: Mutex<Vec<VisitedBuffer>>,
-}
-
-impl VisitedPool {
-    pub fn new(n: u32) -> Self {
-        Self {
-            n,
-            locked_buffers: Mutex::new(Vec::new()),
-        }
-    }
-    pub fn fetch(&self) -> VisitedGuard {
-        let buffer = self
-            .locked_buffers
-            .lock()
-            .pop()
-            .unwrap_or_else(|| VisitedBuffer::new(self.n as _));
-        VisitedGuard { buffer, pool: self }
-    }
-
-    fn fetch2(&self) -> VisitedGuardChecker {
-        let mut buffer = self
-            .locked_buffers
-            .lock()
-            .pop()
-            .unwrap_or_else(|| VisitedBuffer::new(self.n as _));
-        {
-            buffer.version = buffer.version.wrapping_add(1);
-            if buffer.version == 0 {
-                buffer.data.fill(0);
-            }
-        }
-        VisitedGuardChecker { buffer, pool: self }
-    }
-}
-
-struct VisitedGuard<'a> {
-    buffer: VisitedBuffer,
-    pool: &'a VisitedPool,
-}
-
-impl<'a> VisitedGuard<'a> {
-    fn fetch(&mut self) -> VisitedChecker<'_> {
-        self.buffer.version = self.buffer.version.wrapping_add(1);
-        if self.buffer.version == 0 {
-            self.buffer.data.fill(0);
-        }
-        VisitedChecker {
-            buffer: &mut self.buffer,
-        }
-    }
-}
-
-impl<'a> Drop for VisitedGuard<'a> {
-    fn drop(&mut self) {
-        let src = VisitedBuffer {
-            version: 0,
-            data: Vec::new(),
-        };
-        let buffer = std::mem::replace(&mut self.buffer, src);
-        self.pool.locked_buffers.lock().push(buffer);
-    }
-}
-
-struct VisitedChecker<'a> {
-    buffer: &'a mut VisitedBuffer,
-}
-
-impl<'a> VisitedChecker<'a> {
-    fn check(&mut self, i: u32) -> bool {
-        self.buffer.data[i as usize] != self.buffer.version
-    }
-    fn mark(&mut self, i: u32) {
-        self.buffer.data[i as usize] = self.buffer.version;
-    }
-}
-
-struct VisitedGuardChecker<'a> {
-    buffer: VisitedBuffer,
-    pool: &'a VisitedPool,
-}
-
-impl<'a> VisitedGuardChecker<'a> {
-    fn check(&mut self, i: u32) -> bool {
-        self.buffer.data[i as usize] != self.buffer.version
-    }
-    fn mark(&mut self, i: u32) {
-        self.buffer.data[i as usize] = self.buffer.version;
-    }
-}
-
-impl<'a> Drop for VisitedGuardChecker<'a> {
-    fn drop(&mut self) {
-        let src = VisitedBuffer {
-            version: 0,
-            data: Vec::new(),
-        };
-        let buffer = std::mem::replace(&mut self.buffer, src);
-        self.pool.locked_buffers.lock().push(buffer);
-    }
-}
-
-struct VisitedBuffer {
-    version: usize,
-    data: Vec<usize>,
-}
-
-impl VisitedBuffer {
-    fn new(capacity: usize) -> Self {
-        Self {
-            version: 0,
-            data: bytemuck::zeroed_vec(capacity),
-        }
-    }
 }
 
 pub struct ElementHeap {

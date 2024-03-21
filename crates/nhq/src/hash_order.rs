@@ -169,7 +169,11 @@ pub fn generate_min_hash_mapping(
                             }
                             let nb = v;
                             if unvisited[nb as usize] {
-                                qu.push((u32::MAX - next as u32, reverse_graph[nb as usize].len(), nb));
+                                qu.push((
+                                    u32::MAX - next as u32,
+                                    reverse_graph[nb as usize].len(),
+                                    nb,
+                                ));
                                 unvisited[nb as usize] = false;
                             }
                         }

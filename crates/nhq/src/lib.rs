@@ -1,14 +1,20 @@
-use super::hash_order::generate_min_hash_mapping;
-use super::raw::Raw;
-use crate::index::segments::growing::GrowingSegment;
-use crate::index::segments::sealed::SealedSegment;
-use crate::prelude::*;
-use crate::utils::dir_ops::sync_dir;
-use crate::utils::element_heap::ElementHeap;
-use crate::utils::mmap_array::MmapArray;
-use crate::utils::visited_pool::VisitedPool;
-use heapify::*;
+#![feature(trait_alias)]
+#![allow(clippy::len_without_is_empty)]
+
+pub mod hash_order;
+
+use base::index::*;
+use base::operator::*;
+use base::scalar::F32;
+use base::search::*;
+use base::vector::VectorBorrowed;
+use common::dir_ops::sync_dir;
+use common::mmap_array::MmapArray;
+use common::visited_pool::VisitedPool;
+use hash_order::generate_min_hash_mapping;
+use heapify::{make_heap, pop_heap, push_heap};
 use parking_lot::RwLock;
+use quantization::operator::OperatorQuantization;
 use rand::prelude::SliceRandom;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
@@ -16,30 +22,31 @@ use rand::thread_rng;
 use rand::Rng;
 use rand::SeedableRng;
 use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::IntoParallelRefMutIterator;
-use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::ParallelIterator;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::create_dir;
 use std::path::Path;
 use std::sync::Arc;
+use storage::operator::OperatorStorage;
+use storage::StorageCollection;
+
+pub trait OperatorNhq = Operator + OperatorQuantization + OperatorStorage;
 
 const CONTROL_NUM: usize = 1000;
 
-pub struct Nhq<S: G> {
-    mmap: NhqMmap<S>,
+pub struct Nhq<O: OperatorNhq> {
+    mmap: NhqMmap<O>,
 }
 
-impl<S: G> Nhq<S> {
-    pub fn create(
-        path: &Path,
-        options: IndexOptions,
-        sealed: Vec<Arc<SealedSegment<S>>>,
-        growing: Vec<Arc<GrowingSegment<S>>>,
-    ) -> Self {
+impl<O: OperatorNhq> Nhq<O> {
+    pub fn create<S: Source<O>>(path: &Path, options: IndexOptions, source: &S) -> Self {
         create_dir(path).unwrap();
-        let ram = make(path, sealed, growing, options);
+        let ram = make(path, options, source);
         let mmap = save(ram, path);
         sync_dir(path);
         Self { mmap }
@@ -52,7 +59,7 @@ impl<S: G> Nhq<S> {
 
     pub fn basic(
         &self,
-        vector: Borrowed<'_, S>,
+        vector: Borrowed<'_, O>,
         opts: &SearchOptions,
         filter: impl Filter,
     ) -> BinaryHeap<Reverse<Element>> {
@@ -61,7 +68,7 @@ impl<S: G> Nhq<S> {
 
     pub fn vbase<'a>(
         &'a self,
-        vector: Borrowed<'a, S>,
+        vector: Borrowed<'a, O>,
         opts: &'a SearchOptions,
         filter: impl Filter + 'a,
     ) -> (Vec<Element>, Box<(dyn Iterator<Item = Element> + 'a)>) {
@@ -69,25 +76,25 @@ impl<S: G> Nhq<S> {
     }
 
     pub fn len(&self) -> u32 {
-        self.mmap.raw.len()
+        self.mmap.storage.len()
     }
 
-    pub fn vector(&self, i: u32) -> Borrowed<'_, S> {
-        self.mmap.raw.vector(i)
+    pub fn vector(&self, i: u32) -> Borrowed<'_, O> {
+        self.mmap.storage.vector(i)
     }
 
     pub fn payload(&self, i: u32) -> Payload {
-        self.mmap.raw.payload(i)
+        self.mmap.storage.payload(i)
     }
 }
 
-unsafe impl<S: G> Send for Nhq<S> {}
-unsafe impl<S: G> Sync for Nhq<S> {}
+unsafe impl<O: OperatorNhq> Send for Nhq<O> {}
+unsafe impl<O: OperatorNhq> Sync for Nhq<O> {}
 
-pub struct NhqRam<S: G> {
-    raw: Arc<Raw<S>>,
+pub struct NhqRam<O: OperatorNhq> {
+    storage: Arc<StorageCollection<O>>,
     // ----------------------
-    dims: u16,
+    dims: u32,
     // ----------------------
     m: u32,
     // ----------------------
@@ -96,30 +103,29 @@ pub struct NhqRam<S: G> {
     visited: VisitedPool,
 }
 
-pub struct NhqMmap<S: G> {
-    raw: Arc<Raw<S>>,
+pub struct NhqMmap<O: OperatorNhq> {
+    storage: Arc<StorageCollection<O>>,
     // ----------------------
-    dims: u16,
+    dims: u32,
     // ----------------------
     m: u32,
     // ----------------------
     edges: MmapArray<u32>,
     // ----------------------
-    reordered_vectors: MmapArray<Scalar<S>>,
-    reordered_payload: MmapArray<u64>,
+    reordered_vectors: MmapArray<Scalar<O>>,
+    reordered_payload: MmapArray<Payload>,
     // ----------------------
     visited: VisitedPool,
 }
 
-unsafe impl<S: G> Send for NhqMmap<S> {}
-unsafe impl<S: G> Sync for NhqMmap<S> {}
+unsafe impl<O: OperatorNhq> Send for NhqMmap<O> {}
+unsafe impl<O: OperatorNhq> Sync for NhqMmap<O> {}
 
-pub fn make<S: G>(
+pub fn make<O: OperatorNhq, S: Source<O>>(
     path: &Path,
-    sealed: Vec<Arc<SealedSegment<S>>>,
-    growing: Vec<Arc<GrowingSegment<S>>>,
     options: IndexOptions,
-) -> NhqRam<S> {
+    source: &S,
+) -> NhqRam<O> {
     let NhqIndexingOptions {
         m,
         k,
@@ -128,30 +134,26 @@ pub fn make<S: G>(
         r,
         quantization: _,
     } = options.indexing.clone().unwrap_nhq();
-    let raw = Arc::new(Raw::create(
-        &path.join("raw"),
-        options.clone(),
-        sealed,
-        growing,
-    ));
-    let visited = VisitedPool::new(raw.len());
-    let n = raw.len();
-    let mut graph = initialize_graph(raw.clone(), n, l, s);
+    let storage = Arc::new(StorageCollection::create(&path.join("raw"), source));
+    rayon::check();
+    let visited = VisitedPool::new(storage.len());
+    let n = storage.len();
+    let mut graph = initialize_graph(storage.clone(), n, l, s);
     let control_points: Vec<u32> = sample(&mut thread_rng(), n as usize, CONTROL_NUM)
         .iter()
         .map(|i| i as u32)
         .collect();
-    let acc_eval_set = generate_control_set(raw.clone(), &control_points, n);
+    let acc_eval_set = generate_control_set(storage.clone(), &control_points, n);
     loop {
         update(&mut graph, s, r);
-        join(raw.clone(), &mut graph, n);
+        join(storage.clone(), &mut graph, n);
         if eval_recall(&graph, &control_points, &acc_eval_set, k) > 0.8 {
             break;
         }
     }
-    let graph = select_edge(raw.clone(), &mut graph, n, k, m);
+    let graph = select_edge(storage.clone(), &mut graph, n, k, m);
     NhqRam {
-        raw,
+        storage,
         dims: options.vector.dims,
         m,
         graph,
@@ -159,9 +161,9 @@ pub fn make<S: G>(
     }
 }
 
-pub fn save<S: G>(ram: NhqRam<S>, path: &Path) -> NhqMmap<S> {
-    let raw = &ram.raw;
-    let n = raw.len();
+pub fn save<O: OperatorNhq>(ram: NhqRam<O>, path: &Path) -> NhqMmap<O> {
+    let storage = &ram.storage;
+    let n = storage.len();
     let perm = generate_min_hash_mapping(&ram.graph, n, 2, 1, 42);
     // let mut perm = (0..n).collect::<Vec<_>>();
     let mut order = vec![0; n as usize];
@@ -183,12 +185,12 @@ pub fn save<S: G>(ram: NhqRam<S>, path: &Path) -> NhqMmap<S> {
             })
             .flat_map(|v| v.into_iter()),
     );
-    let vectors_iter = (0..n).flat_map(|i| raw.vector(order[i as usize]).to_vec());
-    let payload_iter = (0..n).map(|i| raw.payload(order[i as usize]));
+    let vectors_iter = (0..n).flat_map(|i| storage.vector(order[i as usize]).to_vec());
+    let payload_iter = (0..n).map(|i| storage.payload(order[i as usize]));
     let vectors = MmapArray::create(&path.join("vectors"), vectors_iter);
     let payload = MmapArray::create(&path.join("payload"), payload_iter);
     NhqMmap {
-        raw: ram.raw,
+        storage: ram.storage,
         dims: ram.dims,
         m: ram.m,
         edges,
@@ -198,15 +200,15 @@ pub fn save<S: G>(ram: NhqRam<S>, path: &Path) -> NhqMmap<S> {
     }
 }
 
-pub fn open<S: G>(path: &Path, options: IndexOptions) -> NhqMmap<S> {
+pub fn open<O: OperatorNhq>(path: &Path, options: IndexOptions) -> NhqMmap<O> {
     let idx_opts = options.indexing.clone().unwrap_nhq();
-    let raw = Arc::new(Raw::open(&path.join("raw"), options.clone()));
+    let storage = Arc::new(StorageCollection::open(&path.join("raw"), options.clone()));
     let edges = MmapArray::open(&path.join("edges"));
-    let n = raw.len();
+    let n = storage.len();
     let vectors = MmapArray::open(&path.join("vectors"));
     let payload = MmapArray::open(&path.join("payload"));
     NhqMmap {
-        raw,
+        storage,
         dims: options.vector.dims,
         m: idx_opts.m,
         edges,
@@ -216,9 +218,9 @@ pub fn open<S: G>(path: &Path, options: IndexOptions) -> NhqMmap<S> {
     }
 }
 
-pub fn basic<S: G>(
-    mmap: &NhqMmap<S>,
-    vector: Borrowed<'_, S>,
+pub fn basic<O: OperatorNhq>(
+    mmap: &NhqMmap<O>,
+    vector: Borrowed<'_, O>,
     ef_search: usize,
     mut filter: impl Filter,
 ) -> BinaryHeap<Reverse<Element>> {
@@ -230,7 +232,7 @@ pub fn basic<S: G>(
     let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
     let mut results = ElementHeap::new(ef_search);
     visited.mark(s);
-    let s_dis = S::distance2(
+    let s_dis = O::distance2(
         vector,
         &mmap.reordered_vectors[s as usize * dims..(s as usize + 1) * dims],
     );
@@ -252,7 +254,7 @@ pub fn basic<S: G>(
             if !filter.check(mmap.reordered_payload[v as usize]) {
                 continue;
             }
-            let v_dis = S::distance2(
+            let v_dis = O::distance2(
                 vector,
                 &mmap.reordered_vectors[v as usize * dims..(v as usize + 1) * dims],
             );
@@ -269,9 +271,9 @@ pub fn basic<S: G>(
     results.into_reversed_heap()
 }
 
-pub fn vbase<'a, S: G>(
-    mmap: &'a NhqMmap<S>,
-    vector: Borrowed<'a, S>,
+pub fn vbase<'a, O: OperatorNhq>(
+    mmap: &'a NhqMmap<O>,
+    vector: Borrowed<'a, O>,
     range: usize,
     mut filter: impl Filter + 'a,
 ) -> (Vec<Element>, Box<(dyn Iterator<Item = Element> + 'a)>) {
@@ -282,7 +284,7 @@ pub fn vbase<'a, S: G>(
     let mut visited = mmap.visited.fetch2();
     let mut candidates = BinaryHeap::<Reverse<(F32, u32)>>::new();
     visited.mark(s);
-    let s_dis = S::distance2(
+    let s_dis = O::distance2(
         vector,
         &mmap.reordered_vectors[s as usize * dims..(s as usize + 1) * dims],
     );
@@ -313,7 +315,7 @@ pub fn vbase<'a, S: G>(
             if !filter.check(mmap.reordered_payload[v as usize]) {
                 continue;
             }
-            let v_dis = S::distance2(
+            let v_dis = O::distance2(
                 vector,
                 &mmap.reordered_vectors[v as usize * dims..(v as usize + 1) * dims],
             );
@@ -337,7 +339,7 @@ pub fn vbase<'a, S: G>(
                 }
                 visited.mark(v);
                 if filter.check(mmap.reordered_payload[v as usize]) {
-                    let v_dis = S::distance2(
+                    let v_dis = O::distance2(
                         vector,
                         &mmap.reordered_vectors[v as usize * dims..(v as usize + 1) * dims],
                     );
@@ -350,15 +352,19 @@ pub fn vbase<'a, S: G>(
             payload: mmap.reordered_payload[u as usize],
         })
     });
-    (results.into_sorted_vec(), Box::new(iter))
+    (results.binary_heap.into_sorted_vec(), Box::new(iter))
 }
 
-fn generate_control_set<S: G>(raw: Arc<Raw<S>>, c: &[u32], n: u32) -> Vec<Vec<u32>> {
+fn generate_control_set<O: OperatorNhq>(
+    storage: Arc<StorageCollection<O>>,
+    c: &[u32],
+    n: u32,
+) -> Vec<Vec<u32>> {
     let mut v = vec![Vec::new(); CONTROL_NUM];
     v.par_iter_mut().enumerate().for_each(|(i, vi)| {
         let mut tmp = BinaryHeap::new();
         for j in 0..n {
-            let dist = S::distance(raw.vector(c[i]), raw.vector(j));
+            let dist = O::distance(storage.vector(c[i]), storage.vector(j));
             tmp.push(Neighbor::new(j, dist, true));
         }
         *vi = tmp
@@ -396,7 +402,12 @@ fn eval_recall(graph: &[Nhood], control_points: &[u32], acc_eval_set: &[Vec<u32>
         / control_points.len() as f32
 }
 
-fn initialize_graph<S: G>(raw: Arc<Raw<S>>, n: u32, l: u32, s: u32) -> Vec<Nhood> {
+fn initialize_graph<O: OperatorNhq>(
+    storage: Arc<StorageCollection<O>>,
+    n: u32,
+    l: u32,
+    s: u32,
+) -> Vec<Nhood> {
     let mut graph = Vec::new();
     let mut rng = StdRng::from_entropy();
     graph.resize_with(n as usize, || Nhood::new(l, s, &mut rng, n));
@@ -407,7 +418,7 @@ fn initialize_graph<S: G>(raw: Arc<Raw<S>>, n: u32, l: u32, s: u32) -> Vec<Nhood
             if id == i {
                 continue;
             }
-            let dist = S::distance(raw.vector(i as u32), raw.vector(id as u32));
+            let dist = O::distance(storage.vector(i as u32), storage.vector(id as u32));
             pool.push(Neighbor::new(id as u32, dist, true));
         }
     });
@@ -491,11 +502,11 @@ fn update(graph: &mut Vec<Nhood>, s: u32, r: u32) {
     });
 }
 
-fn join<S: G>(raw: Arc<Raw<S>>, graph: &mut [Nhood], n: u32) {
+fn join<O: OperatorNhq>(storage: Arc<StorageCollection<O>>, graph: &mut [Nhood], n: u32) {
     (0..n).into_par_iter().for_each(|id| {
         graph[id as usize].join(|i, j| {
             if i != j {
-                let dist = S::distance(raw.vector(i), raw.vector(j));
+                let dist = O::distance(storage.vector(i), storage.vector(j));
                 graph[i as usize].insert(j, dist);
                 graph[j as usize].insert(i, dist);
             }
@@ -503,8 +514,8 @@ fn join<S: G>(raw: Arc<Raw<S>>, graph: &mut [Nhood], n: u32) {
     });
 }
 
-fn select_edge<S: G>(
-    raw: Arc<Raw<S>>,
+fn select_edge<O: OperatorNhq>(
+    storage: Arc<StorageCollection<O>>,
     graph: &mut [Nhood],
     n: u32,
     k: u32,
@@ -528,7 +539,7 @@ fn select_edge<S: G>(
                 }
                 let check = node
                     .iter()
-                    .map(|&v| S::distance(raw.vector(*u), raw.vector(v)))
+                    .map(|&v| O::distance(storage.vector(*u), storage.vector(v)))
                     .all(|dist| dist > *u_dis);
                 if check {
                     node.push(*u);
@@ -538,9 +549,9 @@ fn select_edge<S: G>(
     final_graph
 }
 
-pub fn entry<S: G>(mmap: &NhqMmap<S>, mut filter: impl Filter) -> Option<u32> {
+pub fn entry<O: OperatorNhq>(mmap: &NhqMmap<O>, mut filter: impl Filter) -> Option<u32> {
     let m = mmap.m;
-    let n = mmap.raw.len();
+    let n = mmap.storage.len();
     let mut shift = 1u64;
     let mut count = 0u64;
     while shift * m as u64 <= n as u64 {
@@ -566,7 +577,7 @@ pub fn entry<S: G>(mmap: &NhqMmap<S>, mut filter: impl Filter) -> Option<u32> {
     None
 }
 
-fn find_edges<S: G>(mmap: &NhqMmap<S>, u: u32) -> &[u32] {
+fn find_edges<O: OperatorNhq>(mmap: &NhqMmap<O>, u: u32) -> &[u32] {
     let s = u as usize * (mmap.m as usize + 1) + 1;
     let e = s + mmap.edges[s - 1] as usize;
     &mmap.edges[s..e]
@@ -674,5 +685,34 @@ impl Nhood {
                 callback(i, j);
             }
         }
+    }
+}
+
+pub struct ElementHeap {
+    binary_heap: BinaryHeap<Element>,
+    k: usize,
+}
+
+impl ElementHeap {
+    pub fn new(k: usize) -> Self {
+        assert!(k != 0);
+        Self {
+            binary_heap: BinaryHeap::new(),
+            k,
+        }
+    }
+    pub fn check(&self, distance: F32) -> bool {
+        self.binary_heap.len() < self.k || distance < self.binary_heap.peek().unwrap().distance
+    }
+    pub fn push(&mut self, element: Element) -> Option<Element> {
+        self.binary_heap.push(element);
+        if self.binary_heap.len() == self.k + 1 {
+            self.binary_heap.pop()
+        } else {
+            None
+        }
+    }
+    pub fn into_reversed_heap(self) -> BinaryHeap<Reverse<Element>> {
+        self.binary_heap.into_iter().map(Reverse).collect()
     }
 }
