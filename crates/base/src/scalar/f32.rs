@@ -2,6 +2,8 @@ use super::ScalarLike;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
+use std::hash::{Hash, Hasher};
+use std::iter::Sum;
 use std::num::ParseFloatError;
 use std::ops::*;
 use std::str::FromStr;
@@ -10,6 +12,20 @@ use std::str::FromStr;
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct F32(pub f32);
+
+impl Hash for F32 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        use num_traits::{Float, Zero};
+        let bits = if self.is_nan() {
+            f32::NAN.to_bits()
+        } else if self.is_zero() {
+            f32::zero().to_bits()
+        } else {
+            self.0.to_bits()
+        };
+        bits.hash(state)
+    }
+}
 
 impl Debug for F32 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -447,6 +463,12 @@ impl AddAssign<F32> for F32 {
     #[inline(always)]
     fn add_assign(&mut self, rhs: F32) {
         unsafe { self.0 = std::intrinsics::fadd_fast(self.0, rhs.0) }
+    }
+}
+
+impl Sum for F32 {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(F32(0.0), Add::add)
     }
 }
 

@@ -1,12 +1,13 @@
 use crate::datatype::memory_svecf32::{SVecf32Input, SVecf32Output};
 use base::vector::SVecf32Borrowed;
 use pgrx::datum::FromDatum;
+use pgrx::datum::Internal;
 use pgrx::pg_sys::Datum;
 
 #[pgrx::pg_extern(sql = "\
 CREATE FUNCTION _vectors_svecf32_subscript(internal) RETURNS internal
 IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '@FUNCTION_NAME@';")]
-fn _vectors_svecf32_subscript(_fcinfo: pgrx::pg_sys::FunctionCallInfo) -> Datum {
+fn _vectors_svecf32_subscript(_fcinfo: pgrx::pg_sys::FunctionCallInfo) -> Internal {
     #[pgrx::pg_guard]
     unsafe extern "C" fn transform(
         subscript: *mut pgrx::pg_sys::SubscriptingRef,
@@ -141,19 +142,19 @@ fn _vectors_svecf32_subscript(_fcinfo: pgrx::pg_sys::FunctionCallInfo) -> Datum 
                 let workspace = &mut *(state.workspace as *mut Workspace);
                 let input =
                     SVecf32Input::from_datum((*op).resvalue.read(), (*op).resnull.read()).unwrap();
-                let dims = input.dims() as u16;
+                let dims = input.dims() as u32;
                 let Some((start, end)) = workspace.range else {
                     (*op).resnull.write(true);
                     return;
                 };
-                let start: u16 = match start.unwrap_or(0).try_into() {
+                let start: u32 = match start.unwrap_or(0).try_into() {
                     Ok(x) => x,
                     Err(_) => {
                         (*op).resnull.write(true);
                         return;
                     }
                 };
-                let end: u16 = match end.unwrap_or(dims as usize).try_into() {
+                let end: u32 = match end.unwrap_or(dims as usize).try_into() {
                     Ok(x) => x,
                     Err(_) => {
                         (*op).resnull.write(true);
@@ -198,5 +199,5 @@ fn _vectors_svecf32_subscript(_fcinfo: pgrx::pg_sys::FunctionCallInfo) -> Datum 
         fetch_leakproof: false,
         store_leakproof: false,
     };
-    std::ptr::addr_of!(SBSROUTINES).into()
+    Internal::from(Some(Datum::from(std::ptr::addr_of!(SBSROUTINES))))
 }

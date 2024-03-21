@@ -1,12 +1,12 @@
 use super::memory_vecf32::Vecf32Output;
 use crate::datatype::memory_vecf32::Vecf32Input;
 use crate::datatype::typmod::Typmod;
-use crate::prelude::*;
-use base::vector::Vecf32Borrowed;
+use crate::error::*;
+use base::vector::*;
 use pgrx::pg_sys::Oid;
 use std::ffi::{CStr, CString};
 
-#[pgrx::pg_extern(immutable, parallel_safe, strict)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_vecf32_in(input: &CStr, _oid: Oid, typmod: i32) -> Vecf32Output {
     use crate::utils::parse::parse_vector;
     let reserve = Typmod::parse_from_i32(typmod)
@@ -20,13 +20,13 @@ fn _vectors_vecf32_in(input: &CStr, _oid: Oid, typmod: i32) -> Vecf32Output {
             bad_literal(&e.to_string());
         }
         Ok(vector) => {
-            check_value_dims(vector.len());
+            check_value_dims_65535(vector.len());
             Vecf32Output::new(Vecf32Borrowed::new(&vector))
         }
     }
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe, strict)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_vecf32_out(vector: Vecf32Input<'_>) -> CString {
     let mut buffer = String::new();
     buffer.push('[');

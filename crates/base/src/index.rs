@@ -1,8 +1,82 @@
 use crate::distance::*;
 use crate::vector::*;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum CreateError {
+    #[error("Invalid index options.")]
+    InvalidIndexOptions { reason: String },
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum DropError {
+    #[error("Index not found.")]
+    NotExist,
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum FlushError {
+    #[error("Index not found.")]
+    NotExist,
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum InsertError {
+    #[error("Index not found.")]
+    NotExist,
+    #[error("Invalid vector.")]
+    InvalidVector,
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum DeleteError {
+    #[error("Index not found.")]
+    NotExist,
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum BasicError {
+    #[error("Index not found.")]
+    NotExist,
+    #[error("Invalid vector.")]
+    InvalidVector,
+    #[error("Invalid search options.")]
+    InvalidSearchOptions { reason: String },
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum VbaseError {
+    #[error("Index not found.")]
+    NotExist,
+    #[error("Invalid vector.")]
+    InvalidVector,
+    #[error("Invalid search options.")]
+    InvalidSearchOptions { reason: String },
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum ListError {
+    #[error("Index not found.")]
+    NotExist,
+}
+
+#[must_use]
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum StatError {
+    #[error("Index not found.")]
+    NotExist,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +94,7 @@ pub struct IndexOptions {
 
 impl IndexOptions {
     fn validate_index_options(options: &IndexOptions) -> Result<(), ValidationError> {
-        if options.vector.v != VectorKind::SVecf32 {
+        if options.vector.v != VectorKind::SVecf32 && options.vector.v != VectorKind::BVecf32 {
             return Ok(());
         }
         let is_trivial = match &options.indexing {
@@ -31,7 +105,7 @@ impl IndexOptions {
         };
         if !is_trivial {
             return Err(ValidationError::new(
-                "Quantization is not supported for svector.",
+                "Quantization is not supported for svector and bvector.",
             ));
         }
         Ok(())
@@ -40,14 +114,38 @@ impl IndexOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
+#[validate(schema(function = "Self::validate_0"))]
+#[validate(schema(function = "Self::validate_dims"))]
 pub struct VectorOptions {
-    #[validate(range(min = 1, max = 65535))]
+    #[validate(range(min = 1, max = 1_048_575))]
     #[serde(rename = "dimensions")]
-    pub dims: u16,
-    #[serde(rename = "distance")]
-    pub d: DistanceKind,
+    pub dims: u32,
     #[serde(rename = "vector")]
     pub v: VectorKind,
+    #[serde(rename = "distance")]
+    pub d: DistanceKind,
+}
+
+impl VectorOptions {
+    // Jaccard distance is only supported for bvector.
+    pub fn validate_0(&self) -> Result<(), ValidationError> {
+        if self.v != VectorKind::BVecf32 && self.d == DistanceKind::Jaccard {
+            return Err(ValidationError::new(
+                "Jaccard distance is only supported for bvector.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_dims(&self) -> Result<(), ValidationError> {
+        if self.v != VectorKind::SVecf32 && self.dims > 65535 {
+            return Err(ValidationError::new(
+                "Except svector, the maximum number of dimensions is 65535.",
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -55,10 +153,10 @@ pub struct VectorOptions {
 #[validate(schema(function = "Self::validate_0"))]
 pub struct SegmentsOptions {
     #[serde(default = "SegmentsOptions::default_max_growing_segment_size")]
-    #[validate(range(min = 1, max = 4_000_000_000))]
+    #[validate(range(min = 1, max = 4_000_000_000u32))]
     pub max_growing_segment_size: u32,
     #[serde(default = "SegmentsOptions::default_max_sealed_segment_size")]
-    #[validate(range(min = 1, max = 4_000_000_000))]
+    #[validate(range(min = 1, max = 4_000_000_000u32))]
     pub max_sealed_segment_size: u32,
 }
 
@@ -96,7 +194,7 @@ pub struct OptimizingOptions {
     #[validate(range(min = 1, max = 60))]
     pub sealing_secs: u64,
     #[serde(default = "OptimizingOptions::default_sealing_size")]
-    #[validate(range(min = 1, max = 4_000_000_000))]
+    #[validate(range(min = 1, max = 4_000_000_000u32))]
     pub sealing_size: u32,
     #[serde(default = "OptimizingOptions::default_delete_threshold")]
     #[validate(range(min = 0.01, max = 1.00))]

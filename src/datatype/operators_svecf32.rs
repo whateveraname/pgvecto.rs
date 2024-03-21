@@ -1,9 +1,12 @@
 use crate::datatype::memory_svecf32::{SVecf32Input, SVecf32Output};
-use crate::prelude::*;
-use base::global::*;
+use crate::error::*;
+use base::operator::*;
+use base::scalar::*;
+use base::vector::*;
+use num_traits::Zero;
 use std::ops::Deref;
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_add(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> SVecf32Output {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
 
@@ -12,7 +15,7 @@ fn _vectors_svecf32_operator_add(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -
     let mut pos1 = 0;
     let mut pos2 = 0;
     let mut pos = 0;
-    let mut indexes = vec![0u16; size1 + size2];
+    let mut indexes = vec![0; size1 + size2];
     let mut values = vec![F32::zero(); size1 + size2];
     let lhs = lhs.for_borrow();
     let rhs = rhs.for_borrow();
@@ -44,7 +47,7 @@ fn _vectors_svecf32_operator_add(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -
     SVecf32Output::new(SVecf32Borrowed::new(lhs.dims(), &indexes, &values))
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_minus(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> SVecf32Output {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
 
@@ -53,7 +56,7 @@ fn _vectors_svecf32_operator_minus(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>)
     let mut pos1 = 0;
     let mut pos2 = 0;
     let mut pos = 0;
-    let mut indexes = vec![0u16; size1 + size2];
+    let mut indexes = vec![0; size1 + size2];
     let mut values = vec![F32::zero(); size1 + size2];
     let lhs = lhs.for_borrow();
     let rhs = rhs.for_borrow();
@@ -85,55 +88,55 @@ fn _vectors_svecf32_operator_minus(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>)
     SVecf32Output::new(SVecf32Borrowed::new(lhs.dims(), &indexes, &values))
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_lt(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> bool {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     compare(lhs, rhs).is_lt()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_lte(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> bool {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     compare(lhs, rhs).is_le()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_gt(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> bool {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     compare(lhs, rhs).is_gt()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_gte(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> bool {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     compare(lhs, rhs).is_ge()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_eq(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> bool {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     lhs.deref().for_borrow() == rhs.deref().for_borrow()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_neq(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> bool {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     lhs.deref().for_borrow() != rhs.deref().for_borrow()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_cosine(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> f32 {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     SVecf32Cos::distance(lhs.for_borrow(), rhs.for_borrow()).to_f32()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_dot(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> f32 {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     SVecf32Dot::distance(lhs.for_borrow(), rhs.for_borrow()).to_f32()
 }
 
-#[pgrx::pg_extern(immutable, parallel_safe)]
+#[pgrx::pg_extern(immutable, strict, parallel_safe)]
 fn _vectors_svecf32_operator_l2(lhs: SVecf32Input<'_>, rhs: SVecf32Input<'_>) -> f32 {
     check_matched_dims(lhs.dims() as _, rhs.dims() as _);
     SVecf32L2::distance(lhs.for_borrow(), rhs.for_borrow()).to_f32()
