@@ -14,4 +14,7 @@ impl Operator for Vecf16Cos {
     fn distance(lhs: Vecf16Borrowed<'_>, rhs: Vecf16Borrowed<'_>) -> F32 {
         F32(1.0) - vecf16::cosine(lhs.slice(), rhs.slice())
     }
+    fn distance2(lhs: Borrowed<'_, Self>, rhs: &[Scalar<Self>]) -> F32 {
+        F32(1.0) - vecf16::cosine(lhs.slice(), rhs)
+    }
 }

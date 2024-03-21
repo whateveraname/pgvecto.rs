@@ -101,6 +101,7 @@ impl IndexOptions {
             IndexingOptions::Flat(x) => matches!(x.quantization, QuantizationOptions::Trivial(_)),
             IndexingOptions::Ivf(x) => matches!(x.quantization, QuantizationOptions::Trivial(_)),
             IndexingOptions::Hnsw(x) => matches!(x.quantization, QuantizationOptions::Trivial(_)),
+            IndexingOptions::Nhq(x) => matches!(x.quantization, QuantizationOptions::Trivial(_)),
         };
         if !is_trivial {
             return Err(ValidationError::new(
@@ -239,6 +240,7 @@ pub enum IndexingOptions {
     Flat(FlatIndexingOptions),
     Ivf(IvfIndexingOptions),
     Hnsw(HnswIndexingOptions),
+    Nhq(NhqIndexingOptions),
 }
 
 impl IndexingOptions {
@@ -260,6 +262,12 @@ impl IndexingOptions {
         };
         x
     }
+    pub fn unwrap_nhq(self) -> NhqIndexingOptions {
+        let IndexingOptions::Nhq(x) = self else {
+            unreachable!()
+        };
+        x
+    }
 }
 
 impl Default for IndexingOptions {
@@ -274,6 +282,7 @@ impl Validate for IndexingOptions {
             Self::Flat(x) => x.validate(),
             Self::Ivf(x) => x.validate(),
             Self::Hnsw(x) => x.validate(),
+            Self::Nhq(x) => x.validate(),
         }
     }
 }
@@ -369,6 +378,60 @@ impl Default for HnswIndexingOptions {
         Self {
             m: Self::default_m(),
             ef_construction: Self::default_ef_construction(),
+            quantization: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct NhqIndexingOptions {
+    #[serde(default = "NhqIndexingOptions::default_m")]
+    #[validate(range(min = 4, max = 128))]
+    pub m: u32,
+    #[serde(default = "NhqIndexingOptions::default_k")]
+    #[validate(range(min = 4, max = 1000))]
+    pub k: u32,
+    #[serde(default = "NhqIndexingOptions::default_l")]
+    #[validate(range(min = 4, max = 1000))]
+    pub l: u32,
+    #[serde(default = "NhqIndexingOptions::default_s")]
+    #[validate(range(min = 4, max = 1000))]
+    pub s: u32,
+    #[serde(default = "NhqIndexingOptions::default_r")]
+    #[validate(range(min = 4, max = 1000))]
+    pub r: u32,
+    #[serde(default)]
+    #[validate]
+    pub quantization: QuantizationOptions,
+}
+
+impl NhqIndexingOptions {
+    fn default_m() -> u32 {
+        24
+    }
+    fn default_k() -> u32 {
+        300
+    }
+    fn default_l() -> u32 {
+        400
+    }
+    fn default_s() -> u32 {
+        50
+    }
+    fn default_r() -> u32 {
+        500
+    }
+}
+
+impl Default for NhqIndexingOptions {
+    fn default() -> Self {
+        Self {
+            m: Self::default_m(),
+            k: Self::default_k(),
+            l: Self::default_l(),
+            s: Self::default_s(),
+            r: Self::default_r(),
             quantization: Default::default(),
         }
     }

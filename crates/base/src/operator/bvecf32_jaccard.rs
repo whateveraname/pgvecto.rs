@@ -14,4 +14,7 @@ impl Operator for BVecf32Jaccard {
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32 {
         F32(1.) - bvecf32::jaccard(lhs, rhs)
     }
+    fn distance2(_: Borrowed<'_, Self>, _: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }

@@ -14,4 +14,7 @@ impl Operator for Vecf32Cos {
     fn distance(lhs: Vecf32Borrowed<'_>, rhs: Vecf32Borrowed<'_>) -> F32 {
         F32(1.0) - vecf32::cosine(lhs.slice(), rhs.slice())
     }
+    fn distance2(lhs: Borrowed<'_, Self>, rhs: &[Scalar<Self>]) -> F32 {
+        F32(1.0) - vecf32::cosine(lhs.slice(), rhs)
+    }
 }

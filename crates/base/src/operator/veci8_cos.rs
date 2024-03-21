@@ -14,4 +14,7 @@ impl Operator for Veci8Cos {
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32 {
         F32(1.0) - veci8::cosine_distance(&lhs, &rhs)
     }
+    fn distance2(_: Borrowed<'_, Self>, _: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }

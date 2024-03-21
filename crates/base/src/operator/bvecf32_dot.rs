@@ -14,4 +14,7 @@ impl Operator for BVecf32Dot {
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32 {
         bvecf32::dot(lhs, rhs) * (-1.0)
     }
+    fn distance2(_: Borrowed<'_, Self>, _: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }

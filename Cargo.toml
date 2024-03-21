@@ -91,6 +91,8 @@ serde_json = "1"
 thiserror = "1"
 uuid = { version = "1.7.0", features = ["serde", "v4"] }
 validator = { version = "0.17.0", features = ["derive"] }
+heapify = "0.2.0"
+murmurhash3 = "0.0.5"
 
 [workspace.lints]
 rust.unsafe_op_in_unsafe_fn = "forbid"

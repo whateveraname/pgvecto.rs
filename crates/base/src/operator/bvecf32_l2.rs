@@ -14,4 +14,7 @@ impl Operator for BVecf32L2 {
     fn distance(lhs: Borrowed<'_, Self>, rhs: Borrowed<'_, Self>) -> F32 {
         bvecf32::sl2(lhs, rhs)
     }
+    fn distance2(_: Borrowed<'_, Self>, _: &[Scalar<Self>]) -> F32 {
+        unimplemented!()
+    }
 }

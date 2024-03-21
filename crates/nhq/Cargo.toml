@@ -1,0 +1,20 @@
+[package]
+name = "nhq"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rand.workspace = true
+bytemuck.workspace = true
+parking_lot.workspace = true
+murmurhash3.workspace = true
+heapify.workspace = true
+
+base = { path = "../base" }
+common = { path = "../common" }
+quantization = { path = "../quantization" }
+rayon = { path = "../rayon" }
+storage = { path = "../storage" }
+
+[lints]
+workspace = true
