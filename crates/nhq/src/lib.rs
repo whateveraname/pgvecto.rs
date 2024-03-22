@@ -34,6 +34,7 @@ use std::path::Path;
 use std::sync::Arc;
 use storage::operator::OperatorStorage;
 use storage::StorageCollection;
+use storage::vec::VecStorage;
 
 pub trait OperatorNhq = Operator + OperatorQuantization + OperatorStorage;
 
@@ -165,7 +166,7 @@ pub fn save<O: OperatorNhq>(ram: NhqRam<O>, path: &Path) -> NhqMmap<O> {
     let storage = &ram.storage;
     let n = storage.len();
     let perm = generate_min_hash_mapping(&ram.graph, n, 2, 1, 42);
-    // let mut perm = (0..n).collect::<Vec<_>>();
+    // let perm = (0..n).collect::<Vec<_>>();
     let mut order = vec![0; n as usize];
     for i in 0..n {
         order[perm[i as usize] as usize] = i;
@@ -241,12 +242,20 @@ pub fn basic<O: OperatorNhq>(
         distance: s_dis,
         payload: mmap.reordered_payload[s as usize],
     });
+    // let mut stage1 = 1;
     while let Some(Reverse((u_dis, u))) = candidates.pop() {
         if !results.check(u_dis) {
-            break;
+            // if stage1 == 1 {
+            //     stage1 = 0;
+            // } else {
+                break;
+            // }
         }
         let edges = find_edges(mmap, u);
-        for &v in edges {
+        for &v in edges
+            // .iter()
+            // .take((mmap.m as f32 / (stage1 as f32 + 0.5)) as usize)
+        {
             if !visited.check(v) {
                 continue;
             }
@@ -715,4 +724,88 @@ impl ElementHeap {
     pub fn into_reversed_heap(self) -> BinaryHeap<Reverse<Element>> {
         self.binary_heap.into_iter().map(Reverse).collect()
     }
+}
+
+fn mock_make(
+    _: &Path,
+    options: IndexOptions,
+) -> NhqRam<Vecf32L2> {
+    let NhqIndexingOptions {
+        m,
+        k,
+        l,
+        s,
+        r,
+        quantization: _,
+    } = options.indexing.clone().unwrap_nhq();
+    let vectors = MmapArray::open(Path::new("/home/yanqi/stand-alone-test/data/sift_vectors"));
+    let payload = MmapArray::open(Path::new("/home/yanqi/stand-alone-test/data/sift_payload"));
+    let dims = 128;
+    let storage = Arc::new(StorageCollection::<Vecf32L2> {
+        storage: VecStorage::<F32> {
+            vectors,
+            payload,
+            dims,
+        },
+    });
+    rayon::check();
+    let visited = VisitedPool::new(storage.len());
+    let n = storage.len();
+    let mut graph = initialize_graph(storage.clone(), n, l, s);
+    let control_points: Vec<u32> = sample(&mut thread_rng(), n as usize, CONTROL_NUM)
+        .iter()
+        .map(|i| i as u32)
+        .collect();
+    let acc_eval_set = generate_control_set(storage.clone(), &control_points, n);
+    loop {
+        update(&mut graph, s, r);
+        join(storage.clone(), &mut graph, n);
+        if eval_recall(&graph, &control_points, &acc_eval_set, k) > 0.8 {
+            break;
+        }
+    }
+    let graph = select_edge(storage.clone(), &mut graph, n, k, m);
+    NhqRam {
+        storage,
+        dims: options.vector.dims,
+        m,
+        graph,
+        visited,
+    }
+}
+
+pub fn mock_create(path: &Path, options: IndexOptions) -> Nhq<Vecf32L2> {
+    create_dir(path).unwrap();
+    let ram = mock_make(path, options);
+    let mmap = save(ram, path);
+    sync_dir(path);
+    Nhq { mmap }
+}
+
+pub fn mock_open(path: &Path, options: IndexOptions) -> Nhq<Vecf32L2> {
+    let idx_opts = options.indexing.clone().unwrap_nhq();
+    let vectors = MmapArray::open(Path::new("/home/yanqi/stand-alone-test/data/sift_vectors"));
+    let payload = MmapArray::open(Path::new("/home/yanqi/stand-alone-test/data/sift_payload"));
+    let dims = 128;
+    let storage = Arc::new(StorageCollection::<Vecf32L2> {
+        storage: VecStorage::<F32> {
+            vectors,
+            payload,
+            dims,
+        },
+    });
+    let edges = MmapArray::open(&path.join("edges"));
+    let n = storage.len();
+    let vectors = MmapArray::open(&path.join("vectors"));
+    let payload = MmapArray::open(&path.join("payload"));
+    let mmap = NhqMmap {
+        storage,
+        dims: options.vector.dims,
+        m: idx_opts.m,
+        edges,
+        reordered_vectors: vectors,
+        reordered_payload: payload,
+        visited: VisitedPool::new(n),
+    };
+    Nhq { mmap }
 }

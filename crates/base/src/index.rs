@@ -408,7 +408,7 @@ pub struct NhqIndexingOptions {
 
 impl NhqIndexingOptions {
     fn default_m() -> u32 {
-        24
+        32
     }
     fn default_k() -> u32 {
         300

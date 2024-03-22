@@ -2568,6 +2568,7 @@ dependencies = [
  "base",
  "common",
  "hnsw",
+ "nhq",
  "rayon 0.0.0",
  "thiserror",
 ]
